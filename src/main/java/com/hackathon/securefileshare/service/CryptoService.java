@@ -87,6 +87,28 @@ public class CryptoService {
         return signature.verify(signatureBytes);
     }
     
+    // --- Streaming Support ---
+    
+    public Cipher getAESCipher(int mode, SecretKey key) throws Exception {
+        Cipher cipher = Cipher.getInstance(AES_ALGO);
+        cipher.init(mode, key);
+        return cipher;
+    }
+    
+    public Signature getSignatureInstance(String privateKeyStr) throws Exception {
+        PrivateKey privateKey = getPrivateKey(privateKeyStr);
+        Signature signature = Signature.getInstance(SIGNING_ALGO);
+        signature.initSign(privateKey);
+        return signature;
+    }
+    
+    public Signature getVerifySignatureInstance(String publicKeyStr) throws Exception {
+        PublicKey publicKey = getPublicKey(publicKeyStr);
+        Signature signature = Signature.getInstance(SIGNING_ALGO);
+        signature.initVerify(publicKey);
+        return signature;
+    }
+    
     // --- Utils ---
 
     public String keyToString(Key key) {

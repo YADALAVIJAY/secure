@@ -38,7 +38,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             try {
                 username = jwtUtil.extractUsername(jwt);
             } catch (Exception e) {
-                // Token invalid or expired
+                // Token invalid or expired - just ignore, filtering will handle it
+                System.out.println("JWT Parse Error: " + e.getMessage());
             }
         }
 
