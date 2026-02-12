@@ -119,11 +119,14 @@ public class AuthController {
             String username = authentication.getName();
             User user = userService.findByUsername(username);
             
+            // Decrypt the private key from DB format to usable RSA plaintext for the frontend
+            String plaintextPrivateKey = userService.getDecryptedPrivateKey(user);
+            
             return ResponseEntity.ok(new com.hackathon.securefileshare.dto.UserProfile(
                 user.getUsername(),
                 user.getEmail(),
                 user.getPublicKey(),
-                user.getEncryptedPrivateKey()
+                plaintextPrivateKey
             ));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body("Failed to fetch profile");

@@ -147,7 +147,40 @@ public class FileController {
             // Could be other errors, maybe check if it is related to decryption failures?
             // For now, treat generic errors as potential failures if appropriate, or just 500.
             // But usually brute force is specifically about auth/decryption failures.
-            return ResponseEntity.badRequest().build();
+            return ResponseEntity.internalServerError().build();
+        }
+    }
+
+    /**
+     * Download the raw encrypted file (for verification)
+     * GET /api/files/download-encrypted/{fileId}
+     */
+    @GetMapping("/download-encrypted/{fileId}")
+    public ResponseEntity<?> downloadEncryptedFile(
+            @PathVariable Long fileId,
+            Authentication authentication) {
+        
+        try {
+            String username = authentication.getName();
+            
+            // Get raw encrypted bytes
+            byte[] encryptedFile = fileService.downloadEncryptedFile(fileId, username);
+            
+            // Get metadata for filename
+            FileMetadata metadata = fileService.getFileMetadata(fileId);
+            
+            ByteArrayResource resource = new ByteArrayResource(encryptedFile);
+            
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, 
+                           "attachment; filename=\"ENCRYPTED_" + metadata.getFileName() + "\"")
+                    .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                    .contentLength(encryptedFile.length)
+                    .body(resource);
+                    
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(403).body("{\"message\": \"Download failed: " + e.getMessage() + "\"}");
         }
     }
 

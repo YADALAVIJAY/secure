@@ -133,4 +133,39 @@ public class CryptoService {
         KeyFactory kf = KeyFactory.getInstance(RSA_ALGO);
         return kf.generatePrivate(spec);
     }
+    // --- Database Encryption Helpers ---
+    
+    private static final String DB_SECRET_KEY = "HackathonMasterKeySecure1234567"; // 32 chars adjusted below to be safe or use simple padding
+
+    private SecretKey getMasterKey() {
+        // Simple key derivation for demo
+        byte[] key = java.util.Arrays.copyOf(DB_SECRET_KEY.getBytes(), 32); 
+        return new SecretKeySpec(key, AES_ALGO);
+    }
+
+    public String encryptDatabaseField(String plainText) {
+        try {
+            if (plainText == null) return null;
+            Cipher cipher = Cipher.getInstance(AES_ALGO);
+            cipher.init(Cipher.ENCRYPT_MODE, getMasterKey());
+            byte[] encrypted = cipher.doFinal(plainText.getBytes());
+            return Base64.getEncoder().encodeToString(encrypted);
+        } catch (Exception e) {
+            throw new RuntimeException("Error encrypting database field", e);
+        }
+    }
+
+    public String decryptDatabaseField(String encryptedText) {
+        try {
+            if (encryptedText == null) return null;
+            Cipher cipher = Cipher.getInstance(AES_ALGO);
+            cipher.init(Cipher.DECRYPT_MODE, getMasterKey());
+            byte[] decoded = Base64.getDecoder().decode(encryptedText);
+            return new String(cipher.doFinal(decoded));
+        } catch (Exception e) {
+            // Fallback for existing legacy non-encrypted keys
+            System.err.println("Decryption failed, assuming legacy plaintext (or invalid data): " + e.getMessage());
+            return encryptedText;
+        }
+    }
 }

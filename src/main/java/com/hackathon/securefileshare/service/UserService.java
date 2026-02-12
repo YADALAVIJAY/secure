@@ -29,9 +29,10 @@ public class UserService {
 
         // 2. Set Keys
         user.setPublicKey(publicKey);
-        // In a real app, we would encrypt this Private Key with the user's password before storing.
-        // For this hackathon/demo, we store it as is (or base64 encoded) so the backend can automate the signing/decryption.
-        user.setEncryptedPrivateKey(privateKey);
+        
+        // Encrypt the Private Key before storing in DB to prevent leaks
+        String dbEncryptedPrivateKey = cryptoService.encryptDatabaseField(privateKey);
+        user.setEncryptedPrivateKey(dbEncryptedPrivateKey);
 
         // 3. Hash Password
         user.setPassword(passwordEncoder.encode(user.getPassword()));
@@ -42,5 +43,9 @@ public class UserService {
     public User findByUsername(String username) {
         return userRepository.findByUsername(username)
                 .orElseThrow(() -> new RuntimeException("User not found"));
+    }
+
+    public String getDecryptedPrivateKey(User user) {
+        return cryptoService.decryptDatabaseField(user.getEncryptedPrivateKey());
     }
 }

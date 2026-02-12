@@ -51,7 +51,9 @@ public class FileService {
         }
 
         // 4. Encrypt and Sign Stream
-        java.security.Signature signature = cryptoService.getSignatureInstance(sender.getEncryptedPrivateKey());
+        // Decrypt the sender's private key from DB format (AES) to RSA plaintext for signing
+        String senderPrivateKey = cryptoService.decryptDatabaseField(sender.getEncryptedPrivateKey());
+        java.security.Signature signature = cryptoService.getSignatureInstance(senderPrivateKey);
         javax.crypto.Cipher aesCipher = cryptoService.getAESCipher(javax.crypto.Cipher.ENCRYPT_MODE, aesKey);
 
         try (java.io.InputStream is = file.getInputStream();
@@ -109,8 +111,11 @@ public class FileService {
                 .orElseThrow(() -> new RuntimeException("Sender not found"));
 
         // 2. Decrypt AES Key using Receiver's Private Key
+        // Decrypt receiver's private key from DB format first
+        String receiverPrivateKey = cryptoService.decryptDatabaseField(receiver.getEncryptedPrivateKey());
+        
         byte[] encryptedAesKeyBytes = Base64.getDecoder().decode(metadata.getEncryptedAesKey());
-        byte[] aesKeyBytes = cryptoService.decryptRSA(encryptedAesKeyBytes, receiver.getEncryptedPrivateKey());
+        byte[] aesKeyBytes = cryptoService.decryptRSA(encryptedAesKeyBytes, receiverPrivateKey);
         SecretKey aesKey = cryptoService.stringToSecretKey(Base64.getEncoder().encodeToString(aesKeyBytes));
 
         // 3. Decrypt and Verify Stream
@@ -179,7 +184,9 @@ public class FileService {
 
         // 4. CRITICAL: Validate that provided private key matches stored private key
         String normalizedProvidedKey = normalizeKey(providedPrivateKey);
-        String normalizedStoredKey = normalizeKey(receiver.getEncryptedPrivateKey());
+        // Decrypt stored key from DB format before comparison
+        String storedPrivateKey = cryptoService.decryptDatabaseField(receiver.getEncryptedPrivateKey());
+        String normalizedStoredKey = normalizeKey(storedPrivateKey);
 
         System.out.println("DEBUG: Key Validation");
         System.out.println("Provided key (first 30 chars): " + (normalizedProvidedKey.length() > 30 ? normalizedProvidedKey.substring(0, 30) : normalizedProvidedKey));
@@ -236,6 +243,25 @@ public class FileService {
         }
 
         return decryptedOutput.toByteArray();
+    }
+
+    public byte[] downloadEncryptedFile(Long fileId, String username) throws Exception {
+        // 1. Fetch Metadata
+        FileMetadata metadata = fileMetadataRepository.findById(fileId)
+                .orElseThrow(() -> new RuntimeException("File not found"));
+
+        // Security Check: Allow both sender and receiver to download the encrypted blob
+        if (!metadata.getReceiverUsername().equals(username) && !metadata.getSenderUsername().equals(username)) {
+            throw new RuntimeException("Unauthorized access");
+        }
+
+        // 2. Read RAW encrypted file from disk
+        Path filePath = Paths.get(metadata.getFilePath());
+        if (!Files.exists(filePath)) {
+            throw new RuntimeException("File not found on server");
+        }
+        
+        return Files.readAllBytes(filePath);
     }
 
     private String normalizeKey(String key) {
