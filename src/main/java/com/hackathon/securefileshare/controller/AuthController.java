@@ -129,4 +129,39 @@ public class AuthController {
             return ResponseEntity.badRequest().body("Failed to fetch profile");
         }
     }
+    @PostMapping("/verify-password")
+    public ResponseEntity<?> verifyPassword(@RequestBody AuthRequest request, jakarta.servlet.http.HttpServletRequest httpRequest, Authentication authentication) {
+        String clientIp = getClientIp(httpRequest);
+        
+        if (bruteForceProtectionService.isBlocked(clientIp)) {
+             long remainingMillis = bruteForceProtectionService.getBlockTimeRemaining(clientIp);
+             long seconds = (remainingMillis / 1000) % 60;
+             long minutes = (remainingMillis / (1000 * 60)) % 60;
+             String timeString = String.format("%d minutes %d seconds", minutes, seconds);
+             
+             return ResponseEntity.status(429).body("{\"message\": \"Too many failed attempts. You are temporarily blocked. Try again in " + timeString + ".\"}");
+        }
+
+        try {
+            // Re-authenticate to verify password
+            // We use the username from the current authenticated session to ensure they are verifying *their* password
+            String currentUsername = authentication.getName();
+            
+            authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(currentUsername, request.getPassword())
+            );
+
+            // Success
+            bruteForceProtectionService.recordSuccess(clientIp);
+            java.util.Map<String, String> response = new java.util.HashMap<>();
+            response.put("message", "Password verified");
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            // Failure
+            bruteForceProtectionService.recordFailedAttempt(clientIp);
+            java.util.Map<String, String> errorResponse = new java.util.HashMap<>();
+            errorResponse.put("message", "Invalid credentials");
+            return ResponseEntity.badRequest().body(errorResponse);
+        }
+    }
 }
