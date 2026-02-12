@@ -66,20 +66,51 @@ public class AuthController {
         }
     }
 
+    @Autowired
+    private com.hackathon.securefileshare.service.BruteForceProtectionService bruteForceProtectionService;
+
     @PostMapping("/login")
-    public ResponseEntity<?> login(@RequestBody AuthRequest request) {
+    public ResponseEntity<?> login(@RequestBody AuthRequest request, jakarta.servlet.http.HttpServletRequest httpRequest) {
+        String clientIp = getClientIp(httpRequest);
+        System.out.println("DEBUG: Login attempt from IP: " + clientIp);
+
+        if (bruteForceProtectionService.isBlocked(clientIp)) {
+             System.out.println("DEBUG: IP " + clientIp + " is already BLOCKED.");
+             long remainingMillis = bruteForceProtectionService.getBlockTimeRemaining(clientIp);
+             long seconds = (remainingMillis / 1000) % 60;
+             long minutes = (remainingMillis / (1000 * 60)) % 60;
+             String timeString = String.format("%d minutes %d seconds", minutes, seconds);
+             
+             return ResponseEntity.status(429).body("{\"message\": \"Too many failed attempts. You are temporarily blocked. Try again in " + timeString + ".\"}");
+        }
+
         try {
             Authentication authentication = authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword())
             );
+
+            // Success
+            System.out.println("DEBUG: Login successful for IP: " + clientIp);
+            bruteForceProtectionService.recordSuccess(clientIp);
 
             UserDetails userDetails = (UserDetails) authentication.getPrincipal(); // Cast is important
             String jwt = jwtUtil.generateToken(userDetails.getUsername());
 
             return ResponseEntity.ok(new AuthResponse(jwt, userDetails.getUsername()));
         } catch (Exception e) {
+            // Failure
+            System.out.println("DEBUG: Login failed for IP: " + clientIp);
+            bruteForceProtectionService.recordFailedAttempt(clientIp);
             return ResponseEntity.badRequest().body("Invalid credentials");
         }
+    }
+
+    private String getClientIp(jakarta.servlet.http.HttpServletRequest request) {
+        String xfHeader = request.getHeader("X-Forwarded-For");
+        if (xfHeader == null) {
+            return request.getRemoteAddr();
+        }
+        return xfHeader.split(",")[0];
     }
 
     @GetMapping("/profile")

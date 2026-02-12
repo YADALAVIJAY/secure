@@ -1,7 +1,5 @@
 package com.hackathon.securefileshare.dto;
 
-import lombok.Data;
-
 public class AuthRequest {
     private String username;
     private String password;

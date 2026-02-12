@@ -5,7 +5,6 @@ import com.hackathon.securefileshare.model.FileMetadata;
 import com.hackathon.securefileshare.service.FileService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ByteArrayResource;
-import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -22,6 +21,12 @@ public class FileController {
 
     @Autowired
     private FileService fileService;
+    
+    @Autowired
+    private com.hackathon.securefileshare.service.UploadRateLimiterService uploadRateLimiterService;
+    
+    @Autowired
+    private com.hackathon.securefileshare.service.BruteForceProtectionService bruteForceProtectionService;
 
     /**
      * Upload a file with hybrid encryption
@@ -36,8 +41,26 @@ public class FileController {
     public ResponseEntity<?> uploadFile(
             @RequestParam("file") MultipartFile file,
             @RequestParam("receiverUsername") String receiverUsername,
-            Authentication authentication) {
+            Authentication authentication,
+            jakarta.servlet.http.HttpServletRequest request) { // Add HttpServletRequest
         try {
+            String clientIp = getClientIp(request);
+            
+            // 1. Check Brute Force Block (Global IP Block)
+            if (bruteForceProtectionService.isBlocked(clientIp)) {
+                 long remainingMillis = bruteForceProtectionService.getBlockTimeRemaining(clientIp);
+                 long seconds = (remainingMillis / 1000) % 60;
+                 long minutes = (remainingMillis / (1000 * 60)) % 60;
+                 String timeString = String.format("%d minutes %d seconds", minutes, seconds);
+                 
+                 return ResponseEntity.status(429).body("{\"message\": \"Too many failed attempts. You are temporarily blocked. Try again in " + timeString + ".\"}");
+            }
+            
+            // 2. Check Upload Rate Limit
+            if (!uploadRateLimiterService.isAllowed(clientIp)) {
+                return ResponseEntity.status(429).body("{\"message\": \"Upload limit exceeded. Please wait 5 minutes.\"}");
+            }
+        
             if (authentication == null) {
                 return ResponseEntity.status(403).body("{\"message\": \"User not authenticated\"}");
             }
@@ -69,10 +92,24 @@ public class FileController {
      * @return Decrypted file as downloadable resource
      */
     @PostMapping("/download/{fileId}")
-    public ResponseEntity<Resource> downloadFile(
+    public ResponseEntity<?> downloadFile(
             @PathVariable Long fileId,
             @RequestBody PrivateKeyRequest privateKeyRequest,
-            Authentication authentication) {
+            Authentication authentication,
+            jakarta.servlet.http.HttpServletRequest request) { // Add HttpServletRequest
+        
+        String clientIp = getClientIp(request);
+        
+        // 1. Check Block
+        if (bruteForceProtectionService.isBlocked(clientIp)) {
+             long remainingMillis = bruteForceProtectionService.getBlockTimeRemaining(clientIp);
+             long seconds = (remainingMillis / 1000) % 60;
+             long minutes = (remainingMillis / (1000 * 60)) % 60;
+             String timeString = String.format("%d minutes %d seconds", minutes, seconds);
+             
+             return ResponseEntity.status(429).body("{\"message\": \"Too many failed attempts. You are temporarily blocked. Try again in " + timeString + ".\"}");
+        }
+
         try {
             String username = authentication.getName();
             String providedPrivateKey = privateKeyRequest.getPrivateKey();
@@ -84,6 +121,9 @@ public class FileController {
             
             // Download and decrypt file with provided private key
             byte[] decryptedFile = fileService.downloadFileWithPrivateKey(fileId, username, providedPrivateKey);
+            
+            // SUCCESS: Reset attempts
+            bruteForceProtectionService.recordSuccess(clientIp);
             
             // Get file metadata for filename
             FileMetadata metadata = fileService.getFileMetadata(fileId);
@@ -98,10 +138,15 @@ public class FileController {
                     .body(resource);
                     
         } catch (IllegalArgumentException e) {
-            // Invalid private key provided
-            return ResponseEntity.status(403).build();
+            // Invalid private key provided or other auth error
+            // RECORD FAILURE
+            bruteForceProtectionService.recordFailedAttempt(clientIp);
+            return ResponseEntity.status(403).body("{\"message\": \"Invalid private key or unauthorized. Attempt recorded.\"}");
         } catch (Exception e) {
             e.printStackTrace();
+            // Could be other errors, maybe check if it is related to decryption failures?
+            // For now, treat generic errors as potential failures if appropriate, or just 500.
+            // But usually brute force is specifically about auth/decryption failures.
             return ResponseEntity.badRequest().build();
         }
     }
@@ -142,5 +187,17 @@ public class FileController {
             e.printStackTrace();
             return ResponseEntity.badRequest().build();
         }
+    }
+    
+    private String getClientIp(jakarta.servlet.http.HttpServletRequest request) {
+        String xfHeader = request.getHeader("X-Forwarded-For");
+        String ip;
+        if (xfHeader == null) {
+            ip = request.getRemoteAddr();
+        } else {
+            ip = xfHeader.split(",")[0];
+        }
+        System.out.println("DEBUG: Client IP detected: " + ip);
+        return ip;
     }
 }     

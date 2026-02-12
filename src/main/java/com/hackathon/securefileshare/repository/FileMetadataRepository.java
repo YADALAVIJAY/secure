@@ -7,4 +7,6 @@ import java.util.List;
 public interface FileMetadataRepository extends JpaRepository<FileMetadata, Long> {
     List<FileMetadata> findByReceiverUsername(String receiverUsername);
     List<FileMetadata> findBySenderUsername(String senderUsername);
+    
+    List<FileMetadata> findByCreatedAtBefore(java.time.LocalDateTime dateTime);
 }

@@ -244,4 +244,52 @@ public class FileService {
                   .replace("-----END PRIVATE KEY-----", "")
                   .replaceAll("\\s+", ""); // Remove all whitespace/newlines
     }
+
+    @Value("${file.expiration.minutes:2}")
+    private int expirationMinutes;
+
+    @jakarta.annotation.PostConstruct
+    public void init() {
+        System.out.println("FileService initialized.");
+        System.out.println("File Expiration Minutes: " + expirationMinutes);
+        deleteExpiredFiles(); // Run once on startup
+    }
+
+    @org.springframework.scheduling.annotation.Scheduled(cron = "${file.cleanup.cron:0 * * * * *}")
+    public void deleteExpiredFiles() {
+        java.time.LocalDateTime now = java.time.LocalDateTime.now();
+        System.out.println("Scheduler triggered at: " + now);
+        System.out.println("Expiration minutes configured: " + expirationMinutes);
+        
+        try {
+            java.time.LocalDateTime cutoffTime = now.minusMinutes(expirationMinutes);
+            System.out.println("Cutoff time calculated: " + cutoffTime);
+            
+            List<FileMetadata> expiredFiles = fileMetadataRepository.findByCreatedAtBefore(cutoffTime);
+            System.out.println("Found " + expiredFiles.size() + " expired files to delete.");
+
+            for (FileMetadata file : expiredFiles) {
+                try {
+                    // Delete physical file
+                    Path path = Paths.get(file.getFilePath());
+                    if (Files.exists(path)) {
+                        Files.delete(path);
+                        System.out.println("Deleted physical file: " + file.getFileName());
+                    } else {
+                        System.out.println("Physical file not found for: " + file.getFileName());
+                    }
+                    
+                    // Delete metadata
+                    fileMetadataRepository.delete(file);
+                    System.out.println("Deleted metadata for: " + file.getFileName());
+                } catch (Exception e) {
+                    System.err.println("Error deleting file " + file.getFileName() + ": " + e.getMessage());
+                }
+            }
+            System.out.println("File cleanup completed.");
+        } catch (Exception e) {
+            System.err.println("Error during file cleanup task: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
 }
