@@ -14,6 +14,7 @@ import javax.crypto.SecretKey;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 
@@ -30,15 +31,53 @@ public class FileService {
     @Autowired
     private CryptoService cryptoService;
 
+    @Autowired
+    private ClamAVService clamAVService;
+
+    @Autowired
+    private com.hackathon.securefileshare.repository.MalwareLogRepository malwareLogRepository;
+
     @Value("${file.upload-dir:uploads}")
     private String uploadDir;
 
+    private static final List<String> BLOCKED_EXTENSIONS = Arrays.asList(".exe", ".bat", ".sh", ".cmd", ".msi", ".jar", ".js", ".vbs", ".php", ".py", ".pl", ".rb");
+
     public FileMetadata uploadFile(MultipartFile file, String senderUsername, String receiverUsername) throws Exception {
+        // 0. General Validation
+        validateFile(file);
+
         // 1. Get Users
         User sender = userRepository.findByUsername(senderUsername)
                 .orElseThrow(() -> new IllegalArgumentException("Sender not found"));
         User receiver = userRepository.findByUsername(receiverUsername)
                 .orElseThrow(() -> new IllegalArgumentException("Receiver not found"));
+
+        // 1.5 Scan for Malware (ClamAV) - Stream Check
+        try (java.io.InputStream is = file.getInputStream()) {
+            System.out.println("Scanning file: " + file.getOriginalFilename());
+            String scanResult = clamAVService.scanFile(is);
+            
+            if (!clamAVService.isClean(scanResult)) {
+                String virusName = clamAVService.getVirusName(scanResult);
+                System.err.println("MALWARE DETECTED: " + virusName);
+
+                // Log to Database
+                com.hackathon.securefileshare.model.MalwareLog log = new com.hackathon.securefileshare.model.MalwareLog();
+                log.setFileName(file.getOriginalFilename());
+                log.setUploaderUsername(senderUsername);
+                log.setVirusName(virusName);
+                log.setFileType(file.getContentType());
+                log.setFileSize(file.getSize());
+                log.setClientIp("Unknown (Service Layer)"); 
+                malwareLogRepository.save(log);
+
+                throw new SecurityException("Security Alert: Malware detected in file! Upload rejected.");
+            }
+            System.out.println("File is clean. Proceeding to encryption.");
+        } catch (java.io.IOException e) {
+             System.err.println("ClamAV Scan failed: " + e.getMessage());
+             throw new RuntimeException("File scan failed. Service unavailable.");
+        }
 
         // 2. Generate AES Key (Session Key)
         SecretKey aesKey = cryptoService.generateAESKey();
@@ -51,7 +90,6 @@ public class FileService {
         }
 
         // 4. Encrypt and Sign Stream
-        // Decrypt the sender's private key from DB format (AES) to RSA plaintext for signing
         String senderPrivateKey = cryptoService.decryptDatabaseField(sender.getEncryptedPrivateKey());
         java.security.Signature signature = cryptoService.getSignatureInstance(senderPrivateKey);
         javax.crypto.Cipher aesCipher = cryptoService.getAESCipher(javax.crypto.Cipher.ENCRYPT_MODE, aesKey);
@@ -90,70 +128,37 @@ public class FileService {
         
         return fileMetadataRepository.save(metadata);
     }
-
-    public byte[] downloadFile(Long fileId, String username) throws Exception {
-        // 1. Fetch Metadata
-        FileMetadata metadata = fileMetadataRepository.findById(fileId)
-                .orElseThrow(() -> new RuntimeException("File not found"));
-
-        // Security Check
-        if (!metadata.getReceiverUsername().equals(username) && !metadata.getSenderUsername().equals(username)) {
-            throw new RuntimeException("Unauthorized access");
-        }
-        
-        if (!metadata.getReceiverUsername().equals(username)) {
-             throw new RuntimeException("Only receiver can decrypt this file.");
-        }
-
-        User receiver = userRepository.findByUsername(username)
-                .orElseThrow(() -> new RuntimeException("User not found"));
-        User sender = userRepository.findByUsername(metadata.getSenderUsername())
-                .orElseThrow(() -> new RuntimeException("Sender not found"));
-
-        // 2. Decrypt AES Key using Receiver's Private Key
-        // Decrypt receiver's private key from DB format first
-        String receiverPrivateKey = cryptoService.decryptDatabaseField(receiver.getEncryptedPrivateKey());
-        
-        byte[] encryptedAesKeyBytes = Base64.getDecoder().decode(metadata.getEncryptedAesKey());
-        byte[] aesKeyBytes = cryptoService.decryptRSA(encryptedAesKeyBytes, receiverPrivateKey);
-        SecretKey aesKey = cryptoService.stringToSecretKey(Base64.getEncoder().encodeToString(aesKeyBytes));
-
-        // 3. Decrypt and Verify Stream
-        javax.crypto.Cipher aesCipher = cryptoService.getAESCipher(javax.crypto.Cipher.DECRYPT_MODE, aesKey);
-        java.security.Signature signature = cryptoService.getVerifySignatureInstance(sender.getPublicKey());
-        
-        // Use ByteArrayOutputStream to hold decrypted data in memory (Still limited by RAM, but unavoidable if we return byte[]).
-        // To support TRUE large file download, we should return StreamingResponseBody or InputStreamResource.
-        // For now, we at least stream the PROCESS so we don't hold encrypted + decrypted + signature buffers all at once.
-        java.io.ByteArrayOutputStream decryptedOutput = new java.io.ByteArrayOutputStream();
-
-        try (java.io.FileInputStream fis = new java.io.FileInputStream(metadata.getFilePath());
-             javax.crypto.CipherInputStream cis = new javax.crypto.CipherInputStream(fis, aesCipher)) {
-            
-            byte[] buffer = new byte[8192];
-            int bytesRead;
-            while ((bytesRead = cis.read(buffer)) != -1) {
-                signature.update(buffer, 0, bytesRead);
-                decryptedOutput.write(buffer, 0, bytesRead);
+    
+    private void validateFile(MultipartFile file) {
+        String fileName = file.getOriginalFilename();
+        if (fileName != null) {
+            String lowerCaseName = fileName.toLowerCase();
+            for (String ext : BLOCKED_EXTENSIONS) {
+                if (lowerCaseName.endsWith(ext)) {
+                    throw new SecurityException("Security Alert: File type '" + ext + "' is not allowed.");
+                }
             }
         }
-
-        // 4. Verify Signature
-        byte[] signatureBytes = Base64.getDecoder().decode(metadata.getSignature());
-        boolean isVerified = signature.verify(signatureBytes);
-
-        if (!isVerified) {
-            throw new RuntimeException("File tampering detected! Signature verification failed.");
+        
+        // Basic MIME type check
+        String contentType = file.getContentType();
+        if (contentType != null && (
+                contentType.equals("application/x-msdownload") || 
+                contentType.equals("application/x-sh") || 
+                contentType.equals("application/javascript"))) {
+             throw new SecurityException("Security Alert: File MIME type not allowed.");       
         }
+    }
 
-        return decryptedOutput.toByteArray();
+    public byte[] downloadFile(Long fileId, String username) throws Exception {
+        // Obsolete method signature without private key, keeping for backward compatibility if needed, 
+        // but ideally we redirect to downloadFileWithPrivateKey or simply fail.
+        throw new UnsupportedOperationException("Use downloadFileWithPrivateKey instead.");
     }
     
     public List<FileMetadata> getInbox(String username) {
         return fileMetadataRepository.findByReceiverUsername(username);
     }
-    
-    
     
     public List<FileMetadata> getSentFiles(String username) {
         return fileMetadataRepository.findBySenderUsername(username);
@@ -166,7 +171,6 @@ public class FileService {
     
     /**
      * Download file with user-provided private key validation
-     * This ensures only the correct private key can decrypt the file
      */
     public byte[] downloadFileWithPrivateKey(Long fileId, String username, String providedPrivateKey) throws Exception {
         // 1. Get File Metadata
@@ -178,28 +182,20 @@ public class FileService {
             throw new RuntimeException("Only receiver can decrypt this file.");
         }
 
-        // 3. Get receiver from database to compare private keys
+        // 3. Get receiver from database 
         User receiver = userRepository.findByUsername(username)
                 .orElseThrow(() -> new RuntimeException("Receiver not found"));
 
-        // 4. CRITICAL: Validate that provided private key matches stored private key
+        // 4. Validate private key
         String normalizedProvidedKey = normalizeKey(providedPrivateKey);
-        // Decrypt stored key from DB format before comparison
         String storedPrivateKey = cryptoService.decryptDatabaseField(receiver.getEncryptedPrivateKey());
         String normalizedStoredKey = normalizeKey(storedPrivateKey);
 
-        System.out.println("DEBUG: Key Validation");
-        System.out.println("Provided key (first 30 chars): " + (normalizedProvidedKey.length() > 30 ? normalizedProvidedKey.substring(0, 30) : normalizedProvidedKey));
-        System.out.println("Stored key   (first 30 chars): " + (normalizedStoredKey.length() > 30 ? normalizedStoredKey.substring(0, 30) : normalizedStoredKey));
-        System.out.println("Provided Length: " + normalizedProvidedKey.length());
-        System.out.println("Stored Length:   " + normalizedStoredKey.length());
-
         if (!normalizedProvidedKey.equals(normalizedStoredKey)) {
-             System.out.println("ERROR: Keys do not match!");
              throw new IllegalArgumentException("Invalid private key provided. Decryption failed.");
         }
 
-        // 5. Decrypt AES Key using the VALIDATED private key
+        // 5. Decrypt AES Key 
         byte[] encryptedAesKeyBytes = Base64.getDecoder().decode(metadata.getEncryptedAesKey());
         byte[] aesKeyBytes = cryptoService.decryptRSA(encryptedAesKeyBytes, providedPrivateKey);
         SecretKey aesKey = cryptoService.stringToSecretKey(Base64.getEncoder().encodeToString(aesKeyBytes));
@@ -250,7 +246,7 @@ public class FileService {
         FileMetadata metadata = fileMetadataRepository.findById(fileId)
                 .orElseThrow(() -> new RuntimeException("File not found"));
 
-        // Security Check: Allow both sender and receiver to download the encrypted blob
+        // Security Check
         if (!metadata.getReceiverUsername().equals(username) && !metadata.getSenderUsername().equals(username)) {
             throw new RuntimeException("Unauthorized access");
         }
@@ -268,7 +264,7 @@ public class FileService {
         if (key == null) return "";
         return key.replace("-----BEGIN PRIVATE KEY-----", "")
                   .replace("-----END PRIVATE KEY-----", "")
-                  .replaceAll("\\s+", ""); // Remove all whitespace/newlines
+                  .replaceAll("\\s+", ""); 
     }
 
     @Value("${file.expiration.minutes:2}")
@@ -277,44 +273,27 @@ public class FileService {
     @jakarta.annotation.PostConstruct
     public void init() {
         System.out.println("FileService initialized.");
-        System.out.println("File Expiration Minutes: " + expirationMinutes);
-        deleteExpiredFiles(); // Run once on startup
+        deleteExpiredFiles(); 
     }
 
     @org.springframework.scheduling.annotation.Scheduled(cron = "${file.cleanup.cron:0 * * * * *}")
     public void deleteExpiredFiles() {
-        java.time.LocalDateTime now = java.time.LocalDateTime.now();
-        System.out.println("Scheduler triggered at: " + now);
-        System.out.println("Expiration minutes configured: " + expirationMinutes);
-        
         try {
-            java.time.LocalDateTime cutoffTime = now.minusMinutes(expirationMinutes);
-            System.out.println("Cutoff time calculated: " + cutoffTime);
-            
+            java.time.LocalDateTime cutoffTime = java.time.LocalDateTime.now().minusMinutes(expirationMinutes);
             List<FileMetadata> expiredFiles = fileMetadataRepository.findByCreatedAtBefore(cutoffTime);
-            System.out.println("Found " + expiredFiles.size() + " expired files to delete.");
 
             for (FileMetadata file : expiredFiles) {
                 try {
-                    // Delete physical file
                     Path path = Paths.get(file.getFilePath());
                     if (Files.exists(path)) {
                         Files.delete(path);
-                        System.out.println("Deleted physical file: " + file.getFileName());
-                    } else {
-                        System.out.println("Physical file not found for: " + file.getFileName());
                     }
-                    
-                    // Delete metadata
                     fileMetadataRepository.delete(file);
-                    System.out.println("Deleted metadata for: " + file.getFileName());
                 } catch (Exception e) {
-                    System.err.println("Error deleting file " + file.getFileName() + ": " + e.getMessage());
+                    System.err.println("Error deleting file: " + e.getMessage());
                 }
             }
-            System.out.println("File cleanup completed.");
         } catch (Exception e) {
-            System.err.println("Error during file cleanup task: " + e.getMessage());
             e.printStackTrace();
         }
     }

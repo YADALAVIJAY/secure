@@ -2,7 +2,11 @@ package com.hackathon.securefileshare.controller;
 
 import com.hackathon.securefileshare.dto.PrivateKeyRequest;
 import com.hackathon.securefileshare.model.FileMetadata;
+import com.hackathon.securefileshare.service.ClamAVService;
 import com.hackathon.securefileshare.service.FileService;
+import com.hackathon.securefileshare.service.UploadRateLimiterService;
+import com.hackathon.securefileshare.service.BruteForceProtectionService;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpHeaders;
@@ -12,225 +16,246 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
 
 @RestController
 @RequestMapping("/api/files")
-@CrossOrigin(origins = "*", allowedHeaders = "*") // Ensure CORS is allowed at controller level too
+@CrossOrigin(origins = "*", allowedHeaders = "*")
 public class FileController {
 
     @Autowired
     private FileService fileService;
-    
-    @Autowired
-    private com.hackathon.securefileshare.service.UploadRateLimiterService uploadRateLimiterService;
-    
-    @Autowired
-    private com.hackathon.securefileshare.service.BruteForceProtectionService bruteForceProtectionService;
 
-    /**
-     * Upload a file with hybrid encryption
-     * POST /api/files/upload
-     * 
-     * @param file - The file to upload
-     * @param receiverUsername - Username of the receiver
-     * @param authentication - Current authenticated user (sender)
-     * @return FileMetadata of the uploaded file
-     */
+    @Autowired
+    private ClamAVService clamAVService;
+
+    @Autowired
+    private UploadRateLimiterService uploadRateLimiterService;
+
+    @Autowired
+    private BruteForceProtectionService bruteForceProtectionService;
+
+    // ===========================
+    // 🔥 UPLOAD FILE
+    // ===========================
     @PostMapping("/upload")
     public ResponseEntity<?> uploadFile(
             @RequestParam("file") MultipartFile file,
             @RequestParam("receiverUsername") String receiverUsername,
             Authentication authentication,
-            jakarta.servlet.http.HttpServletRequest request) { // Add HttpServletRequest
+            HttpServletRequest request) {
+
         try {
+
             String clientIp = getClientIp(request);
-            
-            // 1. Check Brute Force Block (Global IP Block)
+
+            // 1️⃣ Check if IP is blocked
             if (bruteForceProtectionService.isBlocked(clientIp)) {
-                 long remainingMillis = bruteForceProtectionService.getBlockTimeRemaining(clientIp);
-                 long seconds = (remainingMillis / 1000) % 60;
-                 long minutes = (remainingMillis / (1000 * 60)) % 60;
-                 String timeString = String.format("%d minutes %d seconds", minutes, seconds);
-                 
-                 return ResponseEntity.status(429).body("{\"message\": \"Too many failed attempts. You are temporarily blocked. Try again in " + timeString + ".\"}");
+                long remainingMillis =
+                        bruteForceProtectionService.getBlockTimeRemaining(clientIp);
+
+                long seconds = (remainingMillis / 1000) % 60;
+                long minutes = (remainingMillis / (1000 * 60)) % 60;
+
+                return ResponseEntity.status(429)
+                        .body("{\"message\":\"Too many failed attempts. Try again in "
+                                + minutes + "m " + seconds + "s.\"}");
             }
-            
-            // 2. Check Upload Rate Limit
+
+            // 2️⃣ Upload rate limiting
             if (!uploadRateLimiterService.isAllowed(clientIp)) {
-                return ResponseEntity.status(429).body("{\"message\": \"Upload limit exceeded. Please wait 5 minutes.\"}");
+                return ResponseEntity.status(429)
+                        .body("{\"message\":\"Upload limit exceeded. Wait 5 minutes.\"}");
             }
-        
+
+            // 3️⃣ Authentication check
             if (authentication == null) {
-                return ResponseEntity.status(403).body("{\"message\": \"User not authenticated\"}");
+                return ResponseEntity.status(403)
+                        .body("{\"message\":\"User not authenticated\"}");
             }
-            
+
             String senderUsername = authentication.getName();
-            
+
+            // 4️⃣ File validations
             if (file.isEmpty()) {
-                return ResponseEntity.badRequest().body("{\"message\": \"File is empty\"}");
+                return ResponseEntity.badRequest()
+                        .body("{\"message\":\"File is empty\"}");
             }
-            
-            FileMetadata metadata = fileService.uploadFile(file, senderUsername, receiverUsername);
+
+            if (file.getSize() > 50 * 1024 * 1024) {
+                return ResponseEntity.badRequest()
+                        .body("{\"message\":\"File exceeds 50MB limit\"}");
+            }
+
+            // 5️⃣ 🔥 ClamAV Scan BEFORE encryption
+            String scanResult =
+                    clamAVService.scanFile(file.getInputStream());
+
+            if (!clamAVService.isClean(scanResult)) {
+                String virus =
+                        clamAVService.getVirusName(scanResult);
+
+                return ResponseEntity.badRequest()
+                        .body("{\"message\":\"Virus detected: " + virus + "\"}");
+            }
+
+            // 6️⃣ Proceed with hybrid encryption
+            FileMetadata metadata =
+                    fileService.uploadFile(file, senderUsername, receiverUsername);
+
             return ResponseEntity.ok(metadata);
-            
+
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body("{\"message\": \"" + e.getMessage() + "\"}");
+            return ResponseEntity.badRequest()
+                    .body("{\"message\":\"" + e.getMessage() + "\"}");
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.internalServerError().body("{\"message\": \"Upload failed: " + e.getMessage() + "\"}");
+            return ResponseEntity.internalServerError()
+                    .body("{\"message\":\"Upload failed: "
+                            + e.getMessage() + "\"}");
         }
     }
 
-    /**
-     * Download and decrypt a file with user-provided private key
-     * POST /api/files/download/{fileId}
-     * 
-     * @param fileId - ID of the file to download
-     * @param privateKeyRequest - Request body containing the private key
-     * @param authentication - Current authenticated user (must be receiver)
-     * @return Decrypted file as downloadable resource
-     */
+    // ===========================
+    // 🔐 DOWNLOAD & DECRYPT FILE
+    // ===========================
     @PostMapping("/download/{fileId}")
     public ResponseEntity<?> downloadFile(
             @PathVariable Long fileId,
             @RequestBody PrivateKeyRequest privateKeyRequest,
             Authentication authentication,
-            jakarta.servlet.http.HttpServletRequest request) { // Add HttpServletRequest
-        
+            HttpServletRequest request) {
+
         String clientIp = getClientIp(request);
-        
-        // 1. Check Block
+
         if (bruteForceProtectionService.isBlocked(clientIp)) {
-             long remainingMillis = bruteForceProtectionService.getBlockTimeRemaining(clientIp);
-             long seconds = (remainingMillis / 1000) % 60;
-             long minutes = (remainingMillis / (1000 * 60)) % 60;
-             String timeString = String.format("%d minutes %d seconds", minutes, seconds);
-             
-             return ResponseEntity.status(429).body("{\"message\": \"Too many failed attempts. You are temporarily blocked. Try again in " + timeString + ".\"}");
+            return ResponseEntity.status(429)
+                    .body("{\"message\":\"Too many failed attempts. Try later.\"}");
         }
 
         try {
+
             String username = authentication.getName();
             String providedPrivateKey = privateKeyRequest.getPrivateKey();
-            
-            // Validate that private key is provided
-            if (providedPrivateKey == null || providedPrivateKey.trim().isEmpty()) {
+
+            if (providedPrivateKey == null ||
+                    providedPrivateKey.trim().isEmpty()) {
                 return ResponseEntity.badRequest().build();
             }
-            
-            // Download and decrypt file with provided private key
-            byte[] decryptedFile = fileService.downloadFileWithPrivateKey(fileId, username, providedPrivateKey);
-            
-            // SUCCESS: Reset attempts
+
+            byte[] decryptedFile =
+                    fileService.downloadFileWithPrivateKey(
+                            fileId,
+                            username,
+                            providedPrivateKey
+                    );
+
+            // SUCCESS → Reset brute force counter
             bruteForceProtectionService.recordSuccess(clientIp);
-            
-            // Get file metadata for filename
-            FileMetadata metadata = fileService.getFileMetadata(fileId);
-            
-            ByteArrayResource resource = new ByteArrayResource(decryptedFile);
-            
+
+            FileMetadata metadata =
+                    fileService.getFileMetadata(fileId);
+
+            ByteArrayResource resource =
+                    new ByteArrayResource(decryptedFile);
+
             return ResponseEntity.ok()
-                    .header(HttpHeaders.CONTENT_DISPOSITION, 
-                           "attachment; filename=\"" + metadata.getFileName() + "\"")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"" +
+                                    metadata.getFileName() + "\"")
                     .contentType(MediaType.APPLICATION_OCTET_STREAM)
                     .contentLength(decryptedFile.length)
                     .body(resource);
-                    
+
         } catch (IllegalArgumentException e) {
-            // Invalid private key provided or other auth error
-            // RECORD FAILURE
             bruteForceProtectionService.recordFailedAttempt(clientIp);
-            return ResponseEntity.status(403).body("{\"message\": \"Invalid private key or unauthorized. Attempt recorded.\"}");
+
+            return ResponseEntity.status(403)
+                    .body("{\"message\":\"Invalid private key or unauthorized.\"}");
         } catch (Exception e) {
             e.printStackTrace();
-            // Could be other errors, maybe check if it is related to decryption failures?
-            // For now, treat generic errors as potential failures if appropriate, or just 500.
-            // But usually brute force is specifically about auth/decryption failures.
             return ResponseEntity.internalServerError().build();
         }
     }
 
-    /**
-     * Download the raw encrypted file (for verification)
-     * GET /api/files/download-encrypted/{fileId}
-     */
+    // ===========================
+    // 🔒 DOWNLOAD ENCRYPTED FILE
+    // ===========================
     @GetMapping("/download-encrypted/{fileId}")
     public ResponseEntity<?> downloadEncryptedFile(
             @PathVariable Long fileId,
             Authentication authentication) {
-        
+
         try {
+
             String username = authentication.getName();
-            
-            // Get raw encrypted bytes
-            byte[] encryptedFile = fileService.downloadEncryptedFile(fileId, username);
-            
-            // Get metadata for filename
-            FileMetadata metadata = fileService.getFileMetadata(fileId);
-            
-            ByteArrayResource resource = new ByteArrayResource(encryptedFile);
-            
+
+            byte[] encryptedFile =
+                    fileService.downloadEncryptedFile(fileId, username);
+
+            FileMetadata metadata =
+                    fileService.getFileMetadata(fileId);
+
+            ByteArrayResource resource =
+                    new ByteArrayResource(encryptedFile);
+
             return ResponseEntity.ok()
-                    .header(HttpHeaders.CONTENT_DISPOSITION, 
-                           "attachment; filename=\"ENCRYPTED_" + metadata.getFileName() + "\"")
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"ENCRYPTED_"
+                                    + metadata.getFileName() + "\"")
                     .contentType(MediaType.APPLICATION_OCTET_STREAM)
                     .contentLength(encryptedFile.length)
                     .body(resource);
-                    
+
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(403).body("{\"message\": \"Download failed: " + e.getMessage() + "\"}");
+            return ResponseEntity.status(403)
+                    .body("{\"message\":\"Download failed\"}");
         }
     }
 
-    /**
-     * Get inbox - files received by the current user
-     * GET /api/files/inbox
-     * 
-     * @param authentication - Current authenticated user
-     * @return List of files sent to this user
-     */
+    // ===========================
+    // 📥 INBOX
+    // ===========================
     @GetMapping("/inbox")
-    public ResponseEntity<List<FileMetadata>> getInbox(Authentication authentication) {
+    public ResponseEntity<List<FileMetadata>> getInbox(
+            Authentication authentication) {
+
         try {
             String username = authentication.getName();
-            List<FileMetadata> files = fileService.getInbox(username);
-            return ResponseEntity.ok(files);
+            return ResponseEntity.ok(fileService.getInbox(username));
         } catch (Exception e) {
-            e.printStackTrace();
             return ResponseEntity.badRequest().build();
         }
     }
 
-    /**
-     * Get sent files - files sent by the current user
-     * GET /api/files/sent
-     * 
-     * @param authentication - Current authenticated user
-     * @return List of files sent by this user
-     */
+    // ===========================
+    // 📤 SENT FILES
+    // ===========================
     @GetMapping("/sent")
-    public ResponseEntity<List<FileMetadata>> getSentFiles(Authentication authentication) {
+    public ResponseEntity<List<FileMetadata>> getSentFiles(
+            Authentication authentication) {
+
         try {
             String username = authentication.getName();
-            List<FileMetadata> files = fileService.getSentFiles(username);
-            return ResponseEntity.ok(files);
+            return ResponseEntity.ok(fileService.getSentFiles(username));
         } catch (Exception e) {
-            e.printStackTrace();
             return ResponseEntity.badRequest().build();
         }
     }
-    
-    private String getClientIp(jakarta.servlet.http.HttpServletRequest request) {
+
+    // ===========================
+    // 🌍 CLIENT IP DETECTION
+    // ===========================
+    private String getClientIp(HttpServletRequest request) {
+
         String xfHeader = request.getHeader("X-Forwarded-For");
-        String ip;
+
         if (xfHeader == null) {
-            ip = request.getRemoteAddr();
-        } else {
-            ip = xfHeader.split(",")[0];
+            return request.getRemoteAddr();
         }
-        System.out.println("DEBUG: Client IP detected: " + ip);
-        return ip;
+
+        return xfHeader.split(",")[0];
     }
-}     
+}
