@@ -1,6 +1,6 @@
 package com.hackathon.securefileshare.controller;
 
-import com.hackathon.securefileshare.dto.PrivateKeyRequest;
+
 import com.hackathon.securefileshare.model.FileMetadata;
 
 import com.hackathon.securefileshare.service.FileService;
@@ -43,9 +43,9 @@ public class FileController {
     // ===========================
     @PostMapping("/upload")
     public ResponseEntity<?> uploadFile(
-            @RequestParam("file") MultipartFile file,
-            @RequestParam("receiverUsername") String receiverUsername,
-            @RequestParam("signature") String signature,
+            @RequestParam MultipartFile file,
+            @RequestParam String receiverUsername,
+            @RequestParam String signature,
             Authentication authentication,
             HttpServletRequest request) {
 
@@ -77,7 +77,7 @@ public class FileController {
 
             // 5️⃣ Proceed with storage (Server Encrypted)
             FileMetadata metadata =
-                    fileService.uploadFile(file, senderUsername, receiverUsername, signature);
+                    fileService.uploadFile(file, senderUsername, receiverUsername, signature, clientIp);
 
             return ResponseEntity.ok(metadata);
 
