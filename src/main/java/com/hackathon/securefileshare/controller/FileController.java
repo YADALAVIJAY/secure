@@ -45,8 +45,7 @@ public class FileController {
     public ResponseEntity<?> uploadFile(
             @RequestParam("file") MultipartFile file,
             @RequestParam("receiverUsername") String receiverUsername,
-            @RequestParam("encryptedAesKey") String encryptedAesKey, // NEW
-            @RequestParam("signature") String signature,             // NEW
+            @RequestParam("signature") String signature,
             Authentication authentication,
             HttpServletRequest request) {
 
@@ -76,14 +75,16 @@ public class FileController {
                 return ResponseEntity.badRequest().body("{\"message\":\"File is empty\"}");
             }
 
-            // 5️⃣ Proceed with storage (Client Encrypted)
+            // 5️⃣ Proceed with storage (Server Encrypted)
             FileMetadata metadata =
-                    fileService.uploadFile(file, senderUsername, receiverUsername, encryptedAesKey, signature);
+                    fileService.uploadFile(file, senderUsername, receiverUsername, signature);
 
             return ResponseEntity.ok(metadata);
 
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body("{\"message\":\"" + e.getMessage() + "\"}");
+        } catch (SecurityException e) {
+             return ResponseEntity.status(400).body("{\"message\":\"" + e.getMessage() + "\"}");
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.internalServerError().body("{\"message\":\"Upload failed: " + e.getMessage() + "\"}");

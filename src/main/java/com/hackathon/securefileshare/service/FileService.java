@@ -26,14 +26,18 @@ public class FileService {
     @Autowired
     private UserRepository userRepository;
 
+    @Autowired
+    private ClamAVService clamAVService;
 
+    @Autowired
+    private CryptoService cryptoService;
 
     @Value("${file.upload-dir:uploads}")
     private String uploadDir;
 
     private static final List<String> BLOCKED_EXTENSIONS = Arrays.asList(".exe", ".bat", ".sh", ".cmd", ".msi", ".jar", ".js", ".vbs", ".php", ".py", ".pl", ".rb");
 
-    public FileMetadata uploadFile(MultipartFile file, String senderUsername, String receiverUsername, String encryptedAesKey, String signature) throws Exception {
+    public FileMetadata uploadFile(MultipartFile file, String senderUsername, String receiverUsername, String signature) throws Exception {
         // 0. General Validation
         validateFile(file);
 
@@ -43,37 +47,52 @@ public class FileService {
         User receiver = userRepository.findByUsername(receiverUsername)
                 .orElseThrow(() -> new IllegalArgumentException("Receiver not found"));
 
-        // 1.5 ClamAV Scan (Note: Scanning encrypted files is limited, but we keeping it for basic signature checks if any)
-        try (java.io.InputStream is = file.getInputStream()) {
-            // System.out.println("Scanning file (Encrypted): " + file.getOriginalFilename());
-            // String scanResult = clamAVService.scanFile(is);
-            // if (!clamAVService.isClean(scanResult)) { ... } 
-            // Skipping strictly blocking scan for now as it might false positive on high entropy encrypted data or be useless.
-            // For now, we trust the client-side encryption flow or implement a proper malware scanning pipeline that decrypts in a sandbox if needed.
-            // keeping it simple for Hackathon:
+        // 2. Read File Data
+        byte[] fileBytes = file.getBytes();
+
+        // 3. ClamAV Scan (Server-Side on Plaintext)
+        try (java.io.ByteArrayInputStream bis = new java.io.ByteArrayInputStream(fileBytes)) {
+             System.out.println("Scanning file (Plaintext): " + file.getOriginalFilename());
+             String scanResult = clamAVService.scanFile(bis);
+             
+             if (!clamAVService.isClean(scanResult)) {
+                 String virusName = clamAVService.getVirusName(scanResult);
+                 System.err.println("Malware Detected: " + virusName);
+                 throw new SecurityException("Security Alert: Malware detected (" + virusName + "). Upload rejected.");
+             }
+             System.out.println("Scan Result: Clean");
         }
 
-        // 2. Prepare File Path
+        // 4. Generate AES Key (Server-Side)
+        javax.crypto.SecretKey aesKey = cryptoService.generateAESKey();
+
+        // 5. Encrypt File Content (Server-Side)
+        byte[] encryptedFileBytes = cryptoService.encryptAES(fileBytes, aesKey);
+
+        // 6. Encrypt AES Key for Receiver
+        String encryptedAesKey = cryptoService.encryptRSA(cryptoService.keyToString(aesKey), receiver.getPublicKey());
+
+        // 7. Prepare File Path
         String fileName = System.currentTimeMillis() + "_" + file.getOriginalFilename();
         Path filePath = Paths.get(uploadDir, fileName);
         if (!Files.exists(filePath.getParent())) {
             Files.createDirectories(filePath.getParent());
         }
 
-        // 3. Save Encrypted File to Disk
-        file.transferTo(filePath);
+        // 8. Save Encrypted File to Disk
+        Files.write(filePath, encryptedFileBytes);
 
-        // 4. Save Metadata to DB
+        // 9. Save Metadata to DB
         FileMetadata metadata = new FileMetadata();
         metadata.setFileName(file.getOriginalFilename());
         metadata.setSenderUsername(senderUsername);
         metadata.setReceiverUsername(receiverUsername);
         metadata.setFilePath(filePath.toString());
-        metadata.setEncryptedAesKey(encryptedAesKey); // Provided by Client
-        metadata.setSignature(signature);             // Provided by Client
+        metadata.setEncryptedAesKey(encryptedAesKey); // Encrypted for Receiver
+        metadata.setSignature(signature);             // Signed by Sender (Client-Side)
         metadata.setCreatedAt(java.time.LocalDateTime.now());
 
-        System.out.println("Processing file upload (Client Encrypted): " + metadata.getFileName());
+        System.out.println("Processing file upload (Server Encrypted): " + metadata.getFileName());
         
         return fileMetadataRepository.save(metadata);
     }
