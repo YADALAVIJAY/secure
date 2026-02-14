@@ -53,6 +53,8 @@ public class CryptoService {
 
     // --- AES Operations ---
 
+    private static final String AES_CBC_ALGO = "AES/CBC/PKCS5Padding";
+
     public SecretKey generateAESKey() throws NoSuchAlgorithmException {
         KeyGenerator keyGen = KeyGenerator.getInstance(AES_ALGO);
         keyGen.init(256);
@@ -60,15 +62,35 @@ public class CryptoService {
     }
 
     public byte[] encryptAES(byte[] data, SecretKey key) throws Exception {
-        Cipher cipher = Cipher.getInstance(AES_ALGO);
-        cipher.init(Cipher.ENCRYPT_MODE, key);
-        return cipher.doFinal(data);
+        Cipher cipher = Cipher.getInstance(AES_CBC_ALGO);
+        byte[] iv = new byte[16];
+        new SecureRandom().nextBytes(iv);
+        javax.crypto.spec.IvParameterSpec ivSpec = new javax.crypto.spec.IvParameterSpec(iv);
+        
+        cipher.init(Cipher.ENCRYPT_MODE, key, ivSpec);
+        byte[] encrypted = cipher.doFinal(data);
+        
+        // Combine IV + Encrypted Data
+        byte[] result = new byte[iv.length + encrypted.length];
+        System.arraycopy(iv, 0, result, 0, iv.length);
+        System.arraycopy(encrypted, 0, result, iv.length, encrypted.length);
+        return result;
     }
 
-    public byte[] decryptAES(byte[] encryptedData, SecretKey key) throws Exception {
-        Cipher cipher = Cipher.getInstance(AES_ALGO);
-        cipher.init(Cipher.DECRYPT_MODE, key);
-        return cipher.doFinal(encryptedData);
+    public byte[] decryptAES(byte[] encryptedDataWithIv, SecretKey key) throws Exception {
+        // Extract IV
+        byte[] iv = new byte[16];
+        System.arraycopy(encryptedDataWithIv, 0, iv, 0, 16);
+        javax.crypto.spec.IvParameterSpec ivSpec = new javax.crypto.spec.IvParameterSpec(iv);
+
+        // Extract Encrypted Part
+        int encryptedSize = encryptedDataWithIv.length - 16;
+        byte[] encryptedBytes = new byte[encryptedSize];
+        System.arraycopy(encryptedDataWithIv, 16, encryptedBytes, 0, encryptedSize);
+
+        Cipher cipher = Cipher.getInstance(AES_CBC_ALGO);
+        cipher.init(Cipher.DECRYPT_MODE, key, ivSpec);
+        return cipher.doFinal(encryptedBytes);
     }
 
     // --- Digital Signature ---
