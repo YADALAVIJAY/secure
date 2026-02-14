@@ -15,6 +15,8 @@ import java.util.Base64;
 public class CryptoService {
 
     private static final String RSA_ALGO = "RSA";
+    // Forge (Frontend) defaults to SHA-1 for OAEP. We must match this.
+    private static final String RSA_CIPHER_ALGO = "RSA/ECB/OAEPWithSHA-1AndMGF1Padding";
     private static final String AES_ALGO = "AES";
     private static final String SIGNING_ALGO = "SHA256withRSA";
 
@@ -28,7 +30,7 @@ public class CryptoService {
 
     public String encryptRSA(String data, String publicKeyStr) throws Exception {
         PublicKey publicKey = getPublicKey(publicKeyStr);
-        Cipher cipher = Cipher.getInstance(RSA_ALGO);
+        Cipher cipher = Cipher.getInstance(RSA_CIPHER_ALGO);
         cipher.init(Cipher.ENCRYPT_MODE, publicKey);
         byte[] encryptedBytes = cipher.doFinal(data.getBytes());
         return Base64.getEncoder().encodeToString(encryptedBytes);
@@ -37,14 +39,14 @@ public class CryptoService {
     // Overload for raw bytes (for AES key Encryption)
     public byte[] encryptRSA(byte[] data, String publicKeyStr) throws Exception {
         PublicKey publicKey = getPublicKey(publicKeyStr);
-        Cipher cipher = Cipher.getInstance(RSA_ALGO);
+        Cipher cipher = Cipher.getInstance(RSA_CIPHER_ALGO);
         cipher.init(Cipher.ENCRYPT_MODE, publicKey);
         return cipher.doFinal(data);
     }
 
     public byte[] decryptRSA(byte[] encryptedData, String privateKeyStr) throws Exception {
         PrivateKey privateKey = getPrivateKey(privateKeyStr);
-        Cipher cipher = Cipher.getInstance(RSA_ALGO);
+        Cipher cipher = Cipher.getInstance(RSA_CIPHER_ALGO);
         cipher.init(Cipher.DECRYPT_MODE, privateKey);
         return cipher.doFinal(encryptedData);
     }
