@@ -2,7 +2,7 @@ package com.hackathon.securefileshare.service;
 
 import com.hackathon.securefileshare.model.User;
 import com.hackathon.securefileshare.repository.UserRepository;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
@@ -10,16 +10,12 @@ import java.security.KeyPair;
 import java.util.Base64;
 
 @Service
+@RequiredArgsConstructor
 public class UserService {
 
-    @Autowired
-    private UserRepository userRepository;
-
-    @Autowired
-    private PasswordEncoder passwordEncoder;
-
-    @Autowired
-    private CryptoService cryptoService;
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final CryptoService cryptoService;
 
     public User registerUser(User user) throws Exception {
         // 1. Generate RSA Key Pair
@@ -29,7 +25,7 @@ public class UserService {
 
         // 2. Set Keys
         user.setPublicKey(publicKey);
-        
+
         // Encrypt the Private Key before storing in DB to prevent leaks
         String dbEncryptedPrivateKey = cryptoService.encryptDatabaseField(privateKey);
         user.setEncryptedPrivateKey(dbEncryptedPrivateKey);
@@ -39,7 +35,7 @@ public class UserService {
 
         return userRepository.save(user);
     }
-    
+
     public User findByUsername(String username) {
         return userRepository.findByUsername(username)
                 .orElseThrow(() -> new RuntimeException("User not found"));
@@ -47,5 +43,14 @@ public class UserService {
 
     public String getDecryptedPrivateKey(User user) {
         return cryptoService.decryptDatabaseField(user.getEncryptedPrivateKey());
+    }
+
+    @org.springframework.transaction.annotation.Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    public void blockUserPermanently(String username) {
+        userRepository.findByUsername(username).ifPresent(user -> {
+            user.setBlocked(true);
+            userRepository.save(user);
+            System.err.println("PERMANENT SECURITY BLOCK: User account '" + username + "' has been permanently blocked.");
+        });
     }
 }

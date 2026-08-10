@@ -4,7 +4,7 @@ import com.hackathon.securefileshare.model.FileMetadata;
 import com.hackathon.securefileshare.repository.FileMetadataRepository;
 import com.hackathon.securefileshare.service.FileService;
 
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 
@@ -13,13 +13,11 @@ import java.util.*;
 
 @RestController
 @RequestMapping("/api/debug")
+@RequiredArgsConstructor
 public class DebugController {
 
-    @Autowired
-    private FileMetadataRepository fileMetadataRepository;
-
-    @Autowired
-    private FileService fileService;
+    private final FileMetadataRepository fileMetadataRepository;
+    private final FileService fileService;
 
     @Value("${file.expiration.minutes:2}")
     private int expirationMinutes;

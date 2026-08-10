@@ -32,6 +32,17 @@ public class User {
     @Column(columnDefinition = "TEXT")
     private String encryptedPrivateKey;
 
+    @Column(nullable = false)
+    private boolean isBlocked = false;
+
+    public boolean isBlocked() {
+        return isBlocked;
+    }
+
+    public void setBlocked(boolean blocked) {
+        isBlocked = blocked;
+    }
+
     public Long getId() {
         return id;
     }

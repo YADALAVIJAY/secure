@@ -2,7 +2,7 @@ package com.hackathon.securefileshare.controller;
 
 import com.hackathon.securefileshare.model.User;
 import com.hackathon.securefileshare.service.UserService;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import java.util.Map;
@@ -11,10 +11,10 @@ import java.util.HashMap;
 @RestController
 @RequestMapping("/api/users")
 @CrossOrigin(origins = "*", allowedHeaders = "*")
+@RequiredArgsConstructor
 public class UserController {
 
-    @Autowired
-    private UserService userService;
+    private final UserService userService;
 
     @GetMapping("/{username}/public-key")
     public ResponseEntity<?> getUserPublicKey(@PathVariable String username) {

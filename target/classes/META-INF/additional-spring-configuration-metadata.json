@@ -1,0 +1,44 @@
+{
+    "properties": [
+        {
+            "name": "file.upload-dir",
+            "type": "java.lang.String",
+            "description": "Directory for file uploads."
+        },
+        {
+            "name": "file.keys-dir",
+            "type": "java.lang.String",
+            "description": "Directory for storing keys."
+        },
+        {
+            "name": "file.expiration.minutes",
+            "type": "java.lang.Integer",
+            "description": "File expiration time in minutes."
+        },
+        {
+            "name": "file.cleanup.cron",
+            "type": "java.lang.String",
+            "description": "Cron expression for cleaning up expired files."
+        },
+        {
+            "name": "jwt.secret",
+            "type": "java.lang.String",
+            "description": "Secret key for JWT token generation and validation."
+        },
+        {
+            "name": "jwt.expiration",
+            "type": "java.lang.Long",
+            "description": "Expiration duration in milliseconds for JWT tokens."
+        },
+        {
+            "name": "clamav.host",
+            "type": "java.lang.String",
+            "description": "Host address for ClamAV antivirus server."
+        },
+        {
+            "name": "clamav.port",
+            "type": "java.lang.Integer",
+            "description": "Port number for ClamAV antivirus server."
+        }
+    ]
+}

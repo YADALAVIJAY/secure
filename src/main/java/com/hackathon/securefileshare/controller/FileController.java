@@ -7,7 +7,7 @@ import com.hackathon.securefileshare.service.FileService;
 import com.hackathon.securefileshare.service.UploadRateLimiterService;
 import com.hackathon.securefileshare.service.BruteForceProtectionService;
 
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -22,24 +22,53 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/files")
 @CrossOrigin(origins = "*", allowedHeaders = "*")
+@RequiredArgsConstructor
 public class FileController {
 
-    @Autowired
-    private FileService fileService;
-
-
-
-    @Autowired
-    private UploadRateLimiterService uploadRateLimiterService;
-
-    @Autowired
-    private BruteForceProtectionService bruteForceProtectionService;
+    private final FileService fileService;
+    private final UploadRateLimiterService uploadRateLimiterService;
+    private final BruteForceProtectionService bruteForceProtectionService;
 
     // ===========================
-    // 🔥 UPLOAD FILE
+    // 🛡️ VERIFY FILE (ClamAV Scan)
     // ===========================
+    @PostMapping("/verify")
+    public ResponseEntity<?> verifyFile(
+            @RequestParam MultipartFile file,
+            Authentication authentication,
+            HttpServletRequest request) {
+
+        String clientIp = getClientIp(request);
+        try {
+            if (bruteForceProtectionService.isBlocked(clientIp)) {
+                return ResponseEntity.status(429).body("{\"message\":\"Too many attempts. Blocked.\"}");
+            }
+            if (authentication == null) {
+                return ResponseEntity.status(403).body("{\"message\":\"User not authenticated\"}");
+            }
+
+            String senderUsername = authentication.getName();
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body("{\"message\":\"File is empty\"}");
+            }
+
+            java.util.Map<String, Object> result = fileService.verifyFileOnly(file, senderUsername, clientIp);
+            return ResponseEntity.ok(result);
+
+        } catch (com.hackathon.securefileshare.exception.ClamAVServerOfflineException e) {
+            throw e;
+        } catch (com.hackathon.securefileshare.exception.MalwareDetectedException e) {
+            throw e;
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body("{\"message\":\"" + e.getMessage() + "\"}");
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.internalServerError().body("{\"message\":\"Verification failed: " + e.getMessage() + "\"}");
+        }
+    }
+
     // ===========================
-    // 🔥 UPLOAD FILE (Client Encrypted)
+    // 🔥 UPLOAD & SHARE FILE (Encrypted + Zero Trust)
     // ===========================
     @PostMapping("/upload")
     public ResponseEntity<?> uploadFile(
@@ -49,9 +78,8 @@ public class FileController {
             Authentication authentication,
             HttpServletRequest request) {
 
+        String clientIp = getClientIp(request);
         try {
-
-            String clientIp = getClientIp(request);
 
             // 1️⃣ Check if IP is blocked
             if (bruteForceProtectionService.isBlocked(clientIp)) {
@@ -81,6 +109,10 @@ public class FileController {
 
             return ResponseEntity.ok(metadata);
 
+        } catch (com.hackathon.securefileshare.exception.ClamAVServerOfflineException e) {
+            throw e;
+        } catch (com.hackathon.securefileshare.exception.MalwareDetectedException e) {
+            throw e;
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body("{\"message\":\"" + e.getMessage() + "\"}");
         } catch (SecurityException e) {

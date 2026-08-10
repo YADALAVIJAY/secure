@@ -1,11 +1,11 @@
 package com.hackathon.securefileshare.service;
 
+import com.hackathon.securefileshare.exception.MalwareDetectedException;
 import com.hackathon.securefileshare.model.FileMetadata;
 import com.hackathon.securefileshare.model.User;
 import com.hackathon.securefileshare.repository.FileMetadataRepository;
 import com.hackathon.securefileshare.repository.UserRepository;
-import com.hackathon.securefileshare.repository.MalwareLogRepository;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,22 +19,16 @@ import java.util.List;
 
 @Service
 @Transactional
+@RequiredArgsConstructor
 public class FileService {
 
-    @Autowired
-    private FileMetadataRepository fileMetadataRepository;
-
-    @Autowired
-    private UserRepository userRepository;
-
-    @Autowired
-    private ClamAVService clamAVService;
-
-    @Autowired
-    private CryptoService cryptoService;
-
-    @Autowired
-    private MalwareLogRepository malwareLogRepository;
+    private final FileMetadataRepository fileMetadataRepository;
+    private final UserRepository userRepository;
+    private final ClamAVService clamAVService;
+    private final CryptoService cryptoService;
+    private final MalwareLogService malwareLogService;
+    private final UserService userService;
+    private final BlockedIpService blockedIpService;
 
     @Value("${file.upload-dir:uploads}")
     private String uploadDir;
@@ -42,8 +36,8 @@ public class FileService {
     private static final List<String> BLOCKED_EXTENSIONS = Arrays.asList(".exe", ".bat", ".sh", ".cmd", ".msi", ".jar", ".js", ".vbs", ".php", ".py", ".pl", ".rb");
 
     public FileMetadata uploadFile(MultipartFile file, String senderUsername, String receiverUsername, String signature, String clientIp) throws Exception {
-        // 0. General Validation
-        validateFile(file);
+        // 0. General Validation (File Extension & MIME check)
+        validateFile(file, senderUsername, clientIp);
 
         // 1. Get Users
         userRepository.findByUsername(senderUsername)
@@ -74,21 +68,25 @@ public class FileService {
                      String virusName = clamAVService.getVirusName(scanResult);
                      System.err.println("Malware Detected: " + virusName);
 
-                     // 4a. Log Malware Incident
-                     com.hackathon.securefileshare.model.MalwareLog log = new com.hackathon.securefileshare.model.MalwareLog();
-                     log.setFileName(originalFileName);
-                     log.setUploaderUsername(senderUsername);
-                     log.setClientIp(clientIp);
-                     log.setVirusName(virusName);
-                     log.setFileType(getContentType(tempFilePath));
-                     log.setFileSize(Files.size(tempFilePath));
-                     malwareLogRepository.save(log);
+                     // 4a. Log Malware Incident in independent transaction (REQUIRES_NEW)
+                     malwareLogService.logMalware(
+                             originalFileName,
+                             senderUsername,
+                             clientIp,
+                             virusName,
+                             getContentType(tempFilePath),
+                             Files.size(tempFilePath)
+                     );
 
-                     // 4b. Delete Temporary File IMMEDIATELY
+                     // 4b. PERMANENTLY BLOCK USER & BLACKLIST IP ADDRESS
+                     userService.blockUserPermanently(senderUsername);
+                     blockedIpService.blockIpPermanently(clientIp, "Malware Detected: " + virusName);
+
+                     // 4c. Delete Temporary File IMMEDIATELY
                      Files.deleteIfExists(tempFilePath);
                      System.err.println("Infected file deleted: " + tempFilePath.toString());
 
-                     throw new SecurityException("Security Alert: Malware detected (" + virusName + "). File deleted and incident logged.");
+                     throw new MalwareDetectedException("Security Alert: Malware detected (" + virusName + "). Account PERMANENTLY BLOCKED.", virusName);
                  }
                  System.out.println("Scan Result: Clean");
             }
@@ -140,6 +138,78 @@ public class FileService {
         }
     }
 
+    public java.util.Map<String, Object> verifyFileOnly(MultipartFile file, String senderUsername, String clientIp) throws Exception {
+        // 0. Extension Check for Verification Only (No Permanent User Block)
+        String fileName = file.getOriginalFilename();
+        if (fileName != null) {
+            String lowerCaseName = fileName.toLowerCase();
+            for (String ext : BLOCKED_EXTENSIONS) {
+                if (lowerCaseName.endsWith(ext)) {
+                    malwareLogService.logMalware(
+                        fileName,
+                        senderUsername,
+                        clientIp,
+                        "Blocked Extension (" + ext + ")",
+                        file.getContentType() != null ? file.getContentType() : "unknown",
+                        file.getSize()
+                    );
+                    throw new MalwareDetectedException("Security Alert: File type '" + ext + "' is not allowed.", "Blocked Extension (" + ext + ")");
+                }
+            }
+        }
+
+        // 1. Prepare Temporary File Path
+        String tempFileName = "VERIFY_" + System.currentTimeMillis() + "_" + (fileName != null ? fileName : "file");
+        Path tempFilePath = Paths.get(uploadDir, "temp", tempFileName);
+
+        if (!Files.exists(tempFilePath.getParent())) {
+            Files.createDirectories(tempFilePath.getParent());
+        }
+
+        // 2. Save to temp location
+        file.transferTo(tempFilePath);
+
+        try {
+            // 3. ClamAV Scan
+            try (java.io.InputStream fileInputStream = Files.newInputStream(tempFilePath)) {
+                 String scanResult = clamAVService.scanFile(fileInputStream);
+
+                 if (!clamAVService.isClean(scanResult)) {
+                     String virusName = clamAVService.getVirusName(scanResult);
+
+                     malwareLogService.logMalware(
+                             fileName != null ? fileName : "unknown",
+                             senderUsername,
+                             clientIp,
+                             virusName,
+                             getContentType(tempFilePath),
+                             Files.size(tempFilePath)
+                     );
+
+                     Files.deleteIfExists(tempFilePath);
+                     throw new MalwareDetectedException("Security Alert: Malware detected (" + virusName + "). File blocked.", virusName);
+                 }
+            }
+
+            Files.deleteIfExists(tempFilePath);
+
+            java.util.Map<String, Object> response = new java.util.HashMap<>();
+            response.put("status", "VERIFIED");
+            response.put("fileName", fileName);
+            response.put("fileSize", file.getSize());
+            response.put("scanResult", "CLEAN");
+            response.put("clamavStatus", "PASSED");
+            response.put("message", "File passed ClamAV security scan");
+            return response;
+
+        } catch (Exception e) {
+            try {
+                Files.deleteIfExists(tempFilePath);
+            } catch (java.io.IOException ignored) {}
+            throw e;
+        }
+    }
+
     private String getContentType(Path path) {
         try {
             return Files.probeContentType(path);
@@ -148,13 +218,23 @@ public class FileService {
         }
     }
     
-    private void validateFile(MultipartFile file) {
+    private void validateFile(MultipartFile file, String senderUsername, String clientIp) {
         String fileName = file.getOriginalFilename();
         if (fileName != null) {
             String lowerCaseName = fileName.toLowerCase();
             for (String ext : BLOCKED_EXTENSIONS) {
                 if (lowerCaseName.endsWith(ext)) {
-                    throw new SecurityException("Security Alert: File type '" + ext + "' is not allowed.");
+                    malwareLogService.logMalware(
+                        fileName,
+                        senderUsername,
+                        clientIp,
+                        "Blocked Extension (" + ext + ")",
+                        file.getContentType() != null ? file.getContentType() : "unknown",
+                        file.getSize()
+                    );
+                    userService.blockUserPermanently(senderUsername);
+                    blockedIpService.blockIpPermanently(clientIp, "Blocked Extension (" + ext + ")");
+                    throw new MalwareDetectedException("Security Alert: File type '" + ext + "' is not allowed. Account PERMANENTLY BLOCKED.", "Blocked Extension (" + ext + ")");
                 }
             }
         }
@@ -165,7 +245,17 @@ public class FileService {
                 contentType.equals("application/x-msdownload") || 
                 contentType.equals("application/x-sh") || 
                 contentType.equals("application/javascript"))) {
-             throw new SecurityException("Security Alert: File MIME type not allowed.");       
+             malwareLogService.logMalware(
+                 fileName != null ? fileName : "unknown",
+                 senderUsername,
+                 clientIp,
+                 "Blocked MIME Type (" + contentType + ")",
+                 contentType,
+                 file.getSize()
+             );
+             userService.blockUserPermanently(senderUsername);
+             blockedIpService.blockIpPermanently(clientIp, "Blocked MIME Type (" + contentType + ")");
+             throw new MalwareDetectedException("Security Alert: File MIME type not allowed. Account PERMANENTLY BLOCKED.", "Blocked MIME Type (" + contentType + ")");
         }
     }
 

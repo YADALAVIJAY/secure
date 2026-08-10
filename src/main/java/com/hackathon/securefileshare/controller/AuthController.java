@@ -5,7 +5,9 @@ import com.hackathon.securefileshare.dto.AuthResponse;
 import com.hackathon.securefileshare.model.User;
 import com.hackathon.securefileshare.security.JwtUtil;
 import com.hackathon.securefileshare.service.UserService;
-import org.springframework.beans.factory.annotation.Autowired;
+import com.hackathon.securefileshare.service.BruteForceProtectionService;
+import com.hackathon.securefileshare.service.BlockedIpService;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -15,35 +17,72 @@ import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/auth")
+@RequiredArgsConstructor
 public class AuthController {
 
-    @Autowired
-    private AuthenticationManager authenticationManager;
-
-    @Autowired
-    private UserService userService;
-
-    @Autowired
-    private JwtUtil jwtUtil;
+    private final AuthenticationManager authenticationManager;
+    private final UserService userService;
+    private final com.hackathon.securefileshare.repository.UserRepository userRepository;
+    private final JwtUtil jwtUtil;
+    private final BruteForceProtectionService bruteForceProtectionService;
+    private final BlockedIpService blockedIpService;
 
     @PostMapping("/register")
-    public ResponseEntity<?> register(@RequestBody AuthRequest request) {
+    public ResponseEntity<?> register(@RequestBody AuthRequest request, jakarta.servlet.http.HttpServletRequest httpRequest) {
         try {
-            // Validate input
+            String clientIp = getClientIp(httpRequest);
+            if (blockedIpService.isIpPermanentlyBlocked(clientIp)) {
+                return ResponseEntity.status(403)
+                    .header("Content-Type", "application/json")
+                    .body("{\"message\": \"Registration blocked. Your IP address has been PERMANENTLY BLACKLISTED due to security violations.\"}");
+            }
+            // 1. Username Validation & Uniqueness Check
             if (request.getUsername() == null || request.getUsername().trim().isEmpty()) {
                 return ResponseEntity.badRequest()
                     .header("Content-Type", "application/json")
                     .body("{\"message\": \"Username is required\"}");
             }
+            String username = request.getUsername().trim();
+            if (username.length() < 3 || username.length() > 30 || !username.matches("^[a-zA-Z0-9_-]+$")) {
+                return ResponseEntity.badRequest()
+                    .header("Content-Type", "application/json")
+                    .body("{\"message\": \"Username must be 3-30 characters (letters, numbers, _, -)\"}");
+            }
+            if (userRepository.existsByUsername(username)) {
+                return ResponseEntity.badRequest()
+                    .header("Content-Type", "application/json")
+                    .body("{\"message\": \"Username is already taken. Please choose another username.\"}");
+            }
+
+            // 2. Email Format & Uniqueness Check
             if (request.getEmail() == null || request.getEmail().trim().isEmpty()) {
                 return ResponseEntity.badRequest()
                     .header("Content-Type", "application/json")
-                    .body("{\"message\": \"Email is required\"}");
+                    .body("{\"message\": \"Email address is required\"}");
             }
-            if (request.getPassword() == null || request.getPassword().length() < 6) {
+            String email = request.getEmail().trim();
+            if (!email.matches("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$")) {
                 return ResponseEntity.badRequest()
                     .header("Content-Type", "application/json")
-                    .body("{\"message\": \"Password must be at least 6 characters\"}");
+                    .body("{\"message\": \"Please enter a valid email address (e.g. name@domain.com)\"}");
+            }
+            if (userRepository.existsByEmail(email)) {
+                return ResponseEntity.badRequest()
+                    .header("Content-Type", "application/json")
+                    .body("{\"message\": \"Email address is already registered. Please sign in or use another email.\"}");
+            }
+
+            // 3. Password Complexity Check (Min 8 chars, letters, numbers, special characters)
+            String password = request.getPassword();
+            if (password == null || password.length() < 8) {
+                return ResponseEntity.badRequest()
+                    .header("Content-Type", "application/json")
+                    .body("{\"message\": \"Password must be at least 8 characters long\"}");
+            }
+            if (!password.matches("^(?=.*[A-Za-z])(?=.*\\d)(?=.*[@$!%*?&#_~^+=><-]).{8,}$")) {
+                return ResponseEntity.badRequest()
+                    .header("Content-Type", "application/json")
+                    .body("{\"message\": \"Password must contain letters, numbers, and special characters (e.g. @, #, $, !)\"}");
             }
             
             User user = new User();
@@ -66,13 +105,21 @@ public class AuthController {
         }
     }
 
-    @Autowired
-    private com.hackathon.securefileshare.service.BruteForceProtectionService bruteForceProtectionService;
-
     @PostMapping("/login")
     public ResponseEntity<?> login(@RequestBody AuthRequest request, jakarta.servlet.http.HttpServletRequest httpRequest) {
         String clientIp = getClientIp(httpRequest);
         System.out.println("DEBUG: Login attempt from IP: " + clientIp);
+
+        if (blockedIpService.isIpPermanentlyBlocked(clientIp)) {
+            return ResponseEntity.status(403).body("{\"message\": \"Access Denied. Your IP address has been PERMANENTLY BLACKLISTED due to security violations.\"}");
+        }
+
+        try {
+            User user = userService.findByUsername(request.getUsername());
+            if (user.isBlocked()) {
+                return ResponseEntity.status(403).body("{\"message\": \"Your account has been PERMANENTLY BLOCKED due to security violations.\"}");
+            }
+        } catch (Exception ignored) {}
 
         if (bruteForceProtectionService.isBlocked(clientIp)) {
              System.out.println("DEBUG: IP " + clientIp + " is already BLOCKED.");

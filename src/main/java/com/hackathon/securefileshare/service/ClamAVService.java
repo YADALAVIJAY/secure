@@ -1,5 +1,6 @@
 package com.hackathon.securefileshare.service;
 
+import com.hackathon.securefileshare.exception.ClamAVServerOfflineException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -93,10 +94,10 @@ public class ClamAVService {
             }
 
         } catch (IOException e) {
-            logger.error("ClamAV scanning failed", e);
+            logger.error("ClamAV scanning failed: Could not connect to {}:{}", clamavHost, clamavPort, e);
 
-            // SECURITY POLICY: FAIL CLOSED
-            throw new IOException("ClamAV service unavailable. Upload blocked.", e);
+            // SECURITY POLICY: FAIL CLOSED WITH CLAMAV_OFFLINE EXCEPTION
+            throw new ClamAVServerOfflineException("ANTIVIRUS SERVER OFFLINE: Unable to connect to ClamAV daemon at " + clamavHost + ":" + clamavPort + ". Please ensure ClamAV is running.", e);
         }
     }
 
